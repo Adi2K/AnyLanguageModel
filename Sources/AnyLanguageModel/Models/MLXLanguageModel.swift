@@ -837,15 +837,20 @@ import Foundation
         }
 
         /// Returns the prefix that can actually be reused, or zero for a cache miss.
+        ///
+        /// A cache whose offset no longer matches the stored prefix was changed
+        /// by a request that ended before storing it, such as a cancelled stream.
         internal static func reusablePrefixTokenCount(
             prefixTokens: [Int32],
             prefillTokenCount: Int,
+            cacheOffset: Int,
             currentTokens: [Int32],
             configurationMatches: Bool,
             hasMedia: Bool
         ) -> Int {
             guard !hasMedia, configurationMatches,
-                prefillTokenCount > 0, currentTokens.count > prefillTokenCount,
+                prefillTokenCount > 0, cacheOffset == prefillTokenCount,
+                currentTokens.count > prefillTokenCount,
                 prefixTokens.count == prefillTokenCount,
                 currentTokens.starts(with: prefixTokens)
             else { return 0 }
@@ -869,6 +874,7 @@ import Foundation
                     Self.reusablePrefixTokenCount(
                         prefixTokens: entry.prefixTokens,
                         prefillTokenCount: entry.prefillTokenCount,
+                        cacheOffset: entry.kvCache.first?.offset ?? 0,
                         currentTokens: fullTokens,
                         configurationMatches: entry.cacheConfigSignature == signature,
                         hasMedia: lmInput.image != nil || lmInput.video != nil
@@ -941,6 +947,18 @@ import Foundation
             generateParameters: MLXLMCommon.GenerateParameters,
             session: LanguageModelSession
         ) {
+            // After generation, the cache also holds the response tokens.
+            // The next prompt encodes the response again through the chat template,
+            // so keep only the prompt, or drop the entry if the cache can't be trimmed.
+            let generatedCount = (cache.first?.offset ?? 0) - fullTokens.count
+            if generatedCount > 0 {
+                guard MLXLMCommon.canTrimPromptCache(cache) else {
+                    removeSessionCache(for: session)
+                    return
+                }
+                MLXLMCommon.trimPromptCache(cache, numTokens: generatedCount)
+            }
+
             let offset = cache.first?.offset ?? 0
             let prefillCount = max(0, min(offset, fullTokens.count))
             guard prefillCount > 0 else {
