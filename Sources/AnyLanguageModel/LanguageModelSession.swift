@@ -266,6 +266,25 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    /// Returns the response with a `null` value for each omitted optional property
+    /// when the response format's schema represents `nil` explicitly.
+    nonisolated private static func representingNilExplicitly<Content>(
+        in response: Response<Content>,
+        responseFormat: Transcript.ResponseFormat?
+    ) -> Response<Content> where Content: Generable {
+        guard let responseFormat else { return response }
+        let rawContent = responseFormat.schema.representingNilExplicitly(in: response.rawContent)
+        guard rawContent != response.rawContent else { return response }
+        return Response(
+            // Schema-based responses return the generated content itself.
+            content: (rawContent as? Content) ?? response.content,
+            rawContent: rawContent,
+            transcriptEntries: response.transcriptEntries,
+            usage: response.usage,
+            providerMetadata: response.providerMetadata
+        )
+    }
+
     nonisolated private func wrapStream<Content>(
         _ upstream: sending ResponseStream<Content>,
         promptEntry: Transcript.Entry
@@ -300,12 +319,30 @@ public final class LanguageModelSession: @unchecked Sendable {
                         guard let lastSnapshot else {
                             throw ResponseStreamError.noSnapshots
                         }
+                        // Fill in `null` for omitted optional properties when the schema asks for it,
+                        // and yield the result so that consumers and `collect()` see it.
+                        var rawContent = lastSnapshot.rawContent
+                        if case .prompt(let prompt) = promptEntry, let responseFormat = prompt.responseFormat {
+                            rawContent = responseFormat.schema.representingNilExplicitly(in: rawContent)
+                        }
+                        if rawContent != lastSnapshot.rawContent {
+                            continuation.yield(
+                                ResponseStream<Content>.Snapshot(
+                                    content: (try? Content.PartiallyGenerated(rawContent)) ?? lastSnapshot.content,
+                                    rawContent: rawContent,
+                                    transcriptEntries: lastSnapshot.transcriptEntries,
+                                    usage: lastSnapshot.usage,
+                                    providerMetadata: lastSnapshot.providerMetadata
+                                )
+                            )
+                        }
+
                         // Extract text content from the generated content
                         let textContent: String
-                        if case .string(let str) = lastSnapshot.rawContent.kind {
+                        if case .string(let str) = rawContent.kind {
                             textContent = str
                         } else {
-                            textContent = lastSnapshot.rawContent.jsonString
+                            textContent = rawContent.jsonString
                         }
 
                         let responseEntry = Transcript.Entry.response(
@@ -582,7 +619,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
-            let response = try await generate()
+            let response = Self.representingNilExplicitly(in: try await generate(), responseFormat: responseFormat)
 
             recordUsage(response.usage)
 
@@ -982,12 +1019,15 @@ extension LanguageModelSession {
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
-            let response = try await model.respond(
-                within: self,
-                to: textPrompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
+            let response = Self.representingNilExplicitly(
+                in: try await model.respond(
+                    within: self,
+                    to: textPrompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                ),
+                responseFormat: type == String.self ? nil : .init(type: type)
             )
 
             recordUsage(response.usage)
@@ -1139,6 +1179,52 @@ extension LanguageModelSession {
             issues: issues,
             desiredOutput: desiredOutput
         )
+    }
+
+    /// Logs feedback about the most recent response, with the text you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseText: The text that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseText: String?
+    ) -> Data {
+        let entry = desiredResponseText.map { content in
+            Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.text(.init(content: content))])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
+    }
+
+    /// Logs feedback about the most recent response, with the content you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseContent: The content that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseContent: (any ConvertibleToGeneratedContent)?
+    ) -> Data {
+        let entry = desiredResponseContent.map { content in
+            let segment = Transcript.StructuredSegment(
+                source: String(describing: type(of: content)),
+                content: content.generatedContent
+            )
+            return Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.structure(segment)])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
     }
 }
 
