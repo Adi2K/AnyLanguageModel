@@ -1379,9 +1379,9 @@ extension LanguageModelSession {
             /// The raw content produced so far by the model.
             public var rawContent: GeneratedContent
 
-            /// Transcript entries (tool calls and outputs) produced so far while streaming.
+            /// Transcript entries (reasoning, tool calls and outputs) produced so far while streaming.
             /// Cumulative across tool rounds;
-            /// empty for providers that don't stream tool activity.
+            /// empty for providers that don't stream reasoning or tool activity.
             ///
             /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
             ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.transcriptEntries` API,
@@ -1402,7 +1402,7 @@ extension LanguageModelSession {
             /// - Parameters:
             ///   - content: The partially generated content.
             ///   - rawContent: The raw content produced by the model.
-            ///   - transcriptEntries: Transcript entries accumulated so far (tool calls/outputs).
+            ///   - transcriptEntries: Transcript entries accumulated so far (reasoning/tool calls/outputs).
             ///   - usage: Provider-reported token usage so far.
             ///
             /// - Note: This initializer is exclusive to AnyLanguageModel.

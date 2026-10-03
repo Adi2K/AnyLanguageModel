@@ -613,7 +613,7 @@ struct OllamaMessage: Hashable, Codable, Sendable {
 
 private extension Transcript {
     func toOllamaMessages() throws -> [OllamaMessage] {
-        try map { entry in
+        try compactMap { entry -> OllamaMessage? in
             let role: OllamaMessage.Role
             let segments: [Transcript.Segment]
             switch entry {
@@ -623,6 +623,9 @@ private extension Transcript {
             case .prompt(let prompt):
                 role = .user
                 segments = prompt.segments
+            case .reasoning:
+                // Keep display history in the transcript without sending unsupported replay state.
+                return nil
             case .response(let response):
                 role = .assistant
                 segments = response.segments
