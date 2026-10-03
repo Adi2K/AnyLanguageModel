@@ -63,6 +63,9 @@ import Foundation
 
         /// Custom generation options specific to llama.cpp.
         ///
+        /// Reached through `GenerationOptions[custom: LlamaLanguageModel.self]`,
+        /// an AnyLanguageModel extension.
+        ///
         /// Use this type to pass llama.cpp-specific sampling parameters that are
         /// not part of the standard ``GenerationOptions``.
         ///
@@ -2462,6 +2465,10 @@ import Foundation
     }
 
     /// Errors that can occur when using LlamaLanguageModel
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public enum LlamaLanguageModelError: Error, LocalizedError {
         case modelLoadFailed
         case contextInitializationFailed

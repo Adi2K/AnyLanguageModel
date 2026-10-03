@@ -201,8 +201,9 @@ import Foundation
 
         /// Configures MLX-specific generation behavior.
         ///
-        /// Set these values through ``GenerationOptions`` using
-        /// `GenerationOptions[custom: MLXLanguageModel.self]`.
+        /// Set these values through
+        /// `GenerationOptions[custom: MLXLanguageModel.self]`,
+        /// an AnyLanguageModel extension.
         public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable {
             /// Configures KV-cache behavior for MLX generation.
             public struct KVCache: Codable, Equatable, Sendable {
@@ -2040,6 +2041,10 @@ import Foundation
     // MARK: - Structured JSON Generation
 
     /// Errors that can occur when using MLXLanguageModel.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public enum MLXLanguageModelError: Error, LocalizedError {
         case invalidVocabSize
         case unsupportedJSONValueType
