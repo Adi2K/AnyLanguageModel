@@ -1438,7 +1438,6 @@ import Foundation
                             )
                             let mlxStream = resolved.stream
 
-                            let roundStartTextCount = accumulatedText.count
                             var collectedToolCalls: [MLXLMCommon.ToolCall] = []
                             var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
@@ -1477,12 +1476,6 @@ import Foundation
                                 session: session
                             )
 
-                            // Feed this round's assistant text back into the chat history.
-                            let roundText = String(accumulatedText.dropFirst(roundStartTextCount))
-                            if !roundText.isEmpty {
-                                pendingChat.append(.assistant(roundText))
-                            }
-
                             guard !collectedToolCalls.isEmpty else { break }
 
                             toolIteration += 1
@@ -1519,8 +1512,13 @@ import Foundation
                                 )
                                 for invocation in invocations {
                                     accumulatedEntries.append(.toolOutput(invocation.output))
-                                    pendingChat.append(.tool(toolOutputToJSON(invocation.output)))
                                 }
+                                // Feed the calls and their results back for the next step.
+                                // The text of this round stays in the response and isn't replayed.
+                                pendingChat += makeMLXToolRoundMessages(
+                                    calls: collectedToolCalls,
+                                    results: invocations.map { toolOutputToJSON($0.output) }
+                                )
                                 yieldSnapshot()
                             }
                         }
