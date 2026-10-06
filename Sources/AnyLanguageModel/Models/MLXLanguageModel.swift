@@ -1213,11 +1213,6 @@ import Foundation
                 let assistantText = chunks.joined()
                 allTextChunks.append(assistantText)
 
-                // Add assistant response to chat history
-                if !assistantText.isEmpty {
-                    pendingChat.append(.assistant(assistantText))
-                }
-
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
                     toolIteration += 1
@@ -1258,14 +1253,16 @@ import Foundation
                         if !invocations.isEmpty {
                             allEntries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
 
-                            // Execute each tool and add results to chat
                             for invocation in invocations {
                                 allEntries.append(.toolOutput(invocation.output))
-
-                                // Convert tool output to JSON string for MLX
-                                let toolResultJSON = toolOutputToJSON(invocation.output)
-                                pendingChat.append(.tool(toolResultJSON))
                             }
+
+                            // Feed the calls and their results back for the next step.
+                            // The text of this round stays in the response and isn't replayed.
+                            pendingChat += makeMLXToolRoundMessages(
+                                calls: collectedToolCalls,
+                                results: invocations.map { toolOutputToJSON($0.output) }
+                            )
 
                             // Continue loop to generate with tool results
                             continue
@@ -2025,6 +2022,52 @@ import Foundation
             }
         }
         return textParts.joined(separator: "\n")
+    }
+
+    /// Builds the chat messages for one finished tool round.
+    ///
+    /// Every call gets its own assistant message, directly followed by the tool message
+    /// that answers it and carries the call's id and tool name.
+    /// Chat templates differ in how they tie a result to its call,
+    /// some accept only one call per assistant message,
+    /// and some leave out or reject a result that doesn't follow a call.
+    ///
+    /// A null argument, at any depth, is left out of the replayed call,
+    /// because a null reaches the chat template engine as a value it rejects.
+    ///
+    /// `results[i]` must be the result of `calls[i]`.
+    func makeMLXToolRoundMessages(
+        calls: [MLXLMCommon.ToolCall],
+        results: [String]
+    ) -> [MLXLMCommon.Chat.Message] {
+        var messages: [MLXLMCommon.Chat.Message] = []
+        messages.reserveCapacity(calls.count * 2)
+        for (call, result) in zip(calls, results) {
+            let replayedCall = MLXLMCommon.ToolCall(
+                function: .init(
+                    name: call.function.name,
+                    arguments: call.function.arguments.compactMapValues(removingJSONNulls(from:))
+                ),
+                id: call.id
+            )
+            messages.append(.assistant("", toolCalls: [replayedCall]))
+            messages.append(.tool(result, id: call.id, name: call.function.name))
+        }
+        return messages
+    }
+
+    /// Returns `value` without any JSON null, or `nil` when `value` is itself a null.
+    private func removingJSONNulls(from value: MLXLMCommon.JSONValue) -> MLXLMCommon.JSONValue? {
+        switch value {
+        case .null:
+            return nil
+        case .array(let items):
+            return .array(items.compactMap(removingJSONNulls(from:)))
+        case .object(let fields):
+            return .object(fields.compactMapValues(removingJSONNulls(from:)))
+        default:
+            return value
+        }
     }
 
     /// Builds a JSONSchema-informed prompt for structured output.
