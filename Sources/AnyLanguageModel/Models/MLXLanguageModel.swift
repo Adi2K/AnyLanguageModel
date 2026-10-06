@@ -1693,7 +1693,12 @@ import Foundation
 
     // MARK: - Transcript Conversion
 
-    private func convertTranscriptToMLXChat(
+    /// Converts a transcript into an MLX chat.
+    ///
+    /// A tool output is replayed together with the call it answers,
+    /// in the shape that `makeMLXToolRoundMessages` builds.
+    /// A call that has no output is left out.
+    func convertTranscriptToMLXChat(
         requestContext: LanguageModelSession.RequestContext,
         fallbackPrompt: String
     ) -> [MLXLMCommon.Chat.Message] {
@@ -1713,6 +1718,9 @@ import Foundation
             chat.append(.init(role: .system, content: instructions))
         }
 
+        // Calls of the most recent `.toolCalls` entry that no output has answered yet.
+        var unansweredCalls: [Transcript.ToolCall] = []
+
         // Convert each transcript entry
         for entry in requestContext.transcript {
             switch entry {
@@ -1729,13 +1737,22 @@ import Foundation
                 let content = response.segments.map { extractText(from: $0) }.joined(separator: "\n")
                 chat.append(.assistant(content))
 
-            case .toolCalls:
-                // Tool calls are handled inline during generation loop
-                break
+            case .toolCalls(let toolCalls):
+                // Each call is replayed with its output below.
+                unansweredCalls = Array(toolCalls)
 
             case .toolOutput(let toolOutput):
                 let content = toolOutput.segments.map { extractText(from: $0) }.joined(separator: "\n")
-                chat.append(.tool(content))
+                // An output answers the call that shares its id, or else the oldest unanswered call.
+                let index =
+                    unansweredCalls.firstIndex(where: { $0.id == toolOutput.id })
+                    ?? unansweredCalls.indices.first
+                guard let index else {
+                    chat.append(.tool(content))
+                    continue
+                }
+                let call = unansweredCalls.remove(at: index)
+                chat += makeMLXToolRoundMessages(calls: [makeMLXToolCall(from: call)], results: [content])
             }
         }
 
@@ -1902,6 +1919,16 @@ import Foundation
             )
         }
         return transcriptCalls
+    }
+
+    /// Converts a transcript tool call back into an MLX tool call that keeps the transcript call's id.
+    private func makeMLXToolCall(from call: Transcript.ToolCall) -> MLXLMCommon.ToolCall {
+        let arguments =
+            (try? JSONDecoder().decode([String: MLXLMCommon.JSONValue].self, from: call.arguments.jsonData)) ?? [:]
+        return MLXLMCommon.ToolCall(
+            function: .init(name: call.toolName, arguments: arguments),
+            id: call.id
+        )
     }
 
     private func resolveToolCalls(

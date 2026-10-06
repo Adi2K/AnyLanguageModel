@@ -67,6 +67,43 @@ import Testing
             }
         }
 
+        private func converted(_ entries: [Transcript.Entry]) -> [RawMessage] {
+            let session = LanguageModelSession(
+                model: MockLanguageModel.fixed("unused"),
+                transcript: Transcript(entries: entries)
+            )
+            return raw(
+                convertTranscriptToMLXChat(
+                    requestContext: session.resolvedRequestContext(),
+                    fallbackPrompt: "unused"
+                )
+            )
+        }
+
+        private func roles(_ messages: [RawMessage]) -> [String?] {
+            messages.map { $0["role"] as? String }
+        }
+
+        private func prompt(_ text: String) -> Transcript.Entry {
+            .prompt(Transcript.Prompt(segments: [.text(.init(content: text))]))
+        }
+
+        private func response(_ text: String) -> Transcript.Entry {
+            .response(Transcript.Response(assetIDs: [], segments: [.text(.init(content: text))]))
+        }
+
+        private func transcriptCall(
+            _ name: String,
+            id: String,
+            arguments: String = #"{"city":"Paris"}"#
+        ) throws -> Transcript.ToolCall {
+            try Transcript.ToolCall(id: id, toolName: name, arguments: GeneratedContent(json: arguments))
+        }
+
+        private func output(_ text: String, id: String, toolName: String) -> Transcript.Entry {
+            .toolOutput(Transcript.ToolOutput(id: id, toolName: toolName, segments: [.text(.init(content: text))]))
+        }
+
         @Test func toolRoundPutsTheCallAheadOfItsResult() throws {
             let messages = raw(
                 makeMLXToolRoundMessages(
@@ -150,6 +187,143 @@ import Testing
                 ],
                 in: messages
             )
+        }
+
+        @Test func transcriptToolRoundIsReplayedCallThenResult() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+                response("It is sunny."),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "tool", "assistant"])
+            try expectExchanges([Exchange(name: "get_weather", id: "id-1", result: "sunny")], in: messages, from: 1)
+            #expect(messages.last?["content"] as? String == "It is sunny.")
+            #expect(messages.last?["tool_calls"] == nil)
+        }
+
+        @Test func transcriptToolOutputsArePairedById() throws {
+            let messages = try converted([
+                prompt("What is the weather and the time in Paris?"),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        transcriptCall("get_weather", id: "id-1"),
+                        transcriptCall("get_time", id: "id-2"),
+                    ])
+                ),
+                output("14:05", id: "id-2", toolName: "get_time"),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+            ])
+
+            #expect(messages.count == 5)
+            try expectExchanges(
+                [
+                    Exchange(name: "get_time", id: "id-2", result: "14:05"),
+                    Exchange(name: "get_weather", id: "id-1", result: "sunny"),
+                ],
+                in: messages,
+                from: 1
+            )
+        }
+
+        @Test func transcriptToolOutputsWithOtherIdsArePairedInCallOrder() throws {
+            let messages = try converted([
+                prompt("What is the weather and the time in Paris?"),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        transcriptCall("get_weather", id: "id-1"),
+                        transcriptCall("get_time", id: "id-2"),
+                    ])
+                ),
+                output("sunny", id: "other-1", toolName: "get_weather"),
+                output("14:05", id: "other-2", toolName: "get_time"),
+            ])
+
+            #expect(messages.count == 5)
+            try expectExchanges(
+                [
+                    Exchange(name: "get_weather", id: "id-1", result: "sunny"),
+                    Exchange(name: "get_time", id: "id-2", result: "14:05"),
+                ],
+                in: messages,
+                from: 1
+            )
+        }
+
+        @Test func transcriptToolCallsWithoutOutputsAreNotReplayed() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                response(""),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+        }
+
+        @Test func transcriptToolOutputWithoutCallStaysAPlainToolMessage() {
+            let messages = converted([
+                prompt("What is the weather in Paris?"),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+            ])
+
+            #expect(roles(messages) == ["user", "tool"])
+            #expect(messages.last?["content"] as? String == "sunny")
+            #expect(messages.last?["tool_call_id"] == nil)
+            #expect(messages.last?["name"] == nil)
+        }
+
+        @Test func transcriptToolCallWithANullArgumentIsReplayedWithoutIt() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        transcriptCall("get_weather", id: "id-1", arguments: #"{"city":"Paris","unit":null}"#)
+                    ])
+                ),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "tool"])
+            try expectExchanges([Exchange(name: "get_weather", id: "id-1", result: "sunny")], in: messages, from: 1)
+        }
+
+        @Test func transcriptToolCallsFromAnEarlierStoppedRoundAreNotPairedWithLaterOutputs() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                response(""),
+                prompt("What time is it in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_time", id: "id-2")])),
+                output("14:05", id: "other", toolName: "get_time"),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "user", "assistant", "tool"])
+            try expectExchanges([Exchange(name: "get_time", id: "id-2", result: "14:05")], in: messages, from: 3)
+        }
+
+        @Test func transcriptWithTwoToolRoundsReplaysEachRoundWithItsOwnOutput() throws {
+            let messages = try converted([
+                prompt("What is the weather and the time in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_time", id: "id-2")])),
+                output("14:05", id: "id-2", toolName: "get_time"),
+                response("Sunny, and it is 14:05."),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "tool", "assistant", "tool", "assistant"])
+            try expectExchanges(
+                [
+                    Exchange(name: "get_weather", id: "id-1", result: "sunny"),
+                    Exchange(name: "get_time", id: "id-2", result: "14:05"),
+                ],
+                in: messages,
+                from: 1
+            )
+            #expect(messages.last?["content"] as? String == "Sunny, and it is 14:05.")
+            #expect(messages.last?["tool_calls"] == nil)
         }
     }
 #endif  // MLX
