@@ -303,6 +303,45 @@ import Testing
             try expectExchanges([Exchange(name: "get_time", id: "id-2", result: "14:05")], in: messages, from: 3)
         }
 
+        @Test func transcriptToolOutputAfterALaterPromptIsNotPairedWithAnEarlierCall() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                prompt("What time is it in Paris?"),
+                output("14:05", id: "other", toolName: "get_time"),
+            ])
+
+            #expect(roles(messages) == ["user", "user", "tool"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+            #expect(messages.last?["content"] as? String == "14:05")
+        }
+
+        @Test func transcriptToolOutputAfterAResponseIsNotPairedWithAnEarlierCall() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                response(""),
+                output("14:05", id: "other", toolName: "get_time"),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "tool"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+            #expect(messages.last?["content"] as? String == "14:05")
+        }
+
+        @Test func transcriptToolOutputAfterAResponseIsNotPairedWithAnEarlierCallOfTheSameId() throws {
+            let messages = try converted([
+                prompt("What is the weather in Paris?"),
+                .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                response("Let me check."),
+                output("sunny", id: "id-1", toolName: "get_weather"),
+            ])
+
+            #expect(roles(messages) == ["user", "assistant", "tool"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+            #expect(messages.last?["content"] as? String == "sunny")
+        }
+
         @Test func transcriptWithTwoToolRoundsReplaysEachRoundWithItsOwnOutput() throws {
             let messages = try converted([
                 prompt("What is the weather and the time in Paris?"),

@@ -1698,6 +1698,8 @@ import Foundation
     /// A tool output is replayed together with the call it answers,
     /// in the shape that `makeMLXToolRoundMessages` builds.
     /// A call that has no output is left out.
+    /// An output that comes after a later prompt or response
+    /// is not paired with a call from before it.
     func convertTranscriptToMLXChat(
         requestContext: LanguageModelSession.RequestContext,
         fallbackPrompt: String
@@ -1719,6 +1721,7 @@ import Foundation
         }
 
         // Calls of the most recent `.toolCalls` entry that no output has answered yet.
+        // Emptied at each prompt and response, so an output never answers a call from before one.
         var unansweredCalls: [Transcript.ToolCall] = []
 
         // Convert each transcript entry
@@ -1728,12 +1731,14 @@ import Foundation
                 chat.append(makeMLXChatMessage(from: instr.segments, role: .system))
 
             case .prompt(let prompt):
+                unansweredCalls.removeAll()
                 chat.append(makeMLXChatMessage(from: prompt.segments, role: .user))
 
             case .reasoning:
                 // Keep display history in the transcript without sending unsupported replay state.
                 continue
             case .response(let response):
+                unansweredCalls.removeAll()
                 let content = response.segments.map { extractText(from: $0) }.joined(separator: "\n")
                 chat.append(.assistant(content))
 
