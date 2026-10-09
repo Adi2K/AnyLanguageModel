@@ -1700,6 +1700,7 @@ import Foundation
     /// A call that has no output is left out.
     /// An output that comes after a later prompt or response
     /// is not paired with a call from before it.
+    /// An output that answers no call is replayed on its own, with its own id and tool name.
     func convertTranscriptToMLXChat(
         requestContext: LanguageModelSession.RequestContext,
         fallbackPrompt: String
@@ -1753,7 +1754,8 @@ import Foundation
                     unansweredCalls.firstIndex(where: { $0.id == toolOutput.id })
                     ?? unansweredCalls.indices.first
                 guard let index else {
-                    chat.append(.tool(content))
+                    // No call to replay it with: the output keeps its own id and tool name.
+                    chat.append(.tool(content, id: toolOutput.id, name: toolOutput.toolName))
                     continue
                 }
                 let call = unansweredCalls.remove(at: index)

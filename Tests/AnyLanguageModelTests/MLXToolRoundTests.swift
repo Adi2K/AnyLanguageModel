@@ -262,7 +262,7 @@ import Testing
             #expect(messages.allSatisfy { $0["tool_calls"] == nil })
         }
 
-        @Test func transcriptToolOutputWithoutCallStaysAPlainToolMessage() {
+        @Test func transcriptToolOutputWithoutCallKeepsItsIdAndToolName() {
             let messages = converted([
                 prompt("What is the weather in Paris?"),
                 output("sunny", id: "id-1", toolName: "get_weather"),
@@ -270,8 +270,8 @@ import Testing
 
             #expect(roles(messages) == ["user", "tool"])
             #expect(messages.last?["content"] as? String == "sunny")
-            #expect(messages.last?["tool_call_id"] == nil)
-            #expect(messages.last?["name"] == nil)
+            #expect(messages.last?["tool_call_id"] as? String == "id-1")
+            #expect(messages.last?["name"] as? String == "get_weather")
         }
 
         @Test func transcriptToolCallWithANullArgumentIsReplayedWithoutIt() throws {
