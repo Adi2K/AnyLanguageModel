@@ -11,6 +11,9 @@ import Testing
     struct MLXToolRoundTests {
         private typealias RawMessage = [String: any Sendable]
 
+        /// The shape the tests of the replayed round pin: calls replayed, no text beside them.
+        private let withCalls = MLXToolRoundShape.withCalls(textWithFirstCall: false)
+
         /// A call and the result that must directly follow it.
         private struct Exchange {
             let name: String
@@ -68,6 +71,10 @@ import Testing
         }
 
         private func converted(_ entries: [Transcript.Entry]) -> [RawMessage] {
+            converted(entries, shape: withCalls)
+        }
+
+        private func converted(_ entries: [Transcript.Entry], shape: MLXToolRoundShape) -> [RawMessage] {
             let session = LanguageModelSession(
                 model: MockLanguageModel.fixed("unused"),
                 transcript: Transcript(entries: entries)
@@ -75,7 +82,8 @@ import Testing
             return raw(
                 convertTranscriptToMLXChat(
                     requestContext: session.resolvedRequestContext(),
-                    fallbackPrompt: "unused"
+                    fallbackPrompt: "unused",
+                    toolRoundShape: shape
                 )
             )
         }
@@ -108,7 +116,9 @@ import Testing
             let messages = raw(
                 makeMLXToolRoundMessages(
                     calls: [call("get_weather", id: "call_1")],
-                    results: ["sunny"]
+                    results: ["sunny"],
+                    text: "",
+                    shape: withCalls
                 )
             )
 
@@ -121,7 +131,8 @@ import Testing
                 makeMLXToolRoundMessages(
                     calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
                     results: ["sunny", "14:05"],
-                    text: "I will look that up."
+                    text: "I will look that up.",
+                    shape: .withCalls(textWithFirstCall: true)
                 )
             )
 
@@ -139,7 +150,9 @@ import Testing
             let messages = raw(
                 makeMLXToolRoundMessages(
                     calls: [callWithNullArgument("get_weather", id: "call_1")],
-                    results: ["sunny"]
+                    results: ["sunny"],
+                    text: "",
+                    shape: withCalls
                 )
             )
 
@@ -159,7 +172,9 @@ import Testing
                 ),
                 id: "call_1"
             )
-            let messages = raw(makeMLXToolRoundMessages(calls: [nested], results: ["sunny"]))
+            let messages = raw(
+                makeMLXToolRoundMessages(calls: [nested], results: ["sunny"], text: "", shape: withCalls)
+            )
 
             let calls = try #require(messages.first?["tool_calls"] as? [[String: any Sendable]])
             let function = try #require(calls.first?["function"] as? [String: any Sendable])
@@ -176,7 +191,9 @@ import Testing
             let messages = raw(
                 makeMLXToolRoundMessages(
                     calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
-                    results: ["sunny", "14:05"]
+                    results: ["sunny", "14:05"],
+                    text: "",
+                    shape: withCalls
                 )
             )
 
@@ -194,7 +211,9 @@ import Testing
             let messages = raw(
                 makeMLXToolRoundMessages(
                     calls: [call("get_weather"), call("get_time")],
-                    results: ["sunny", "14:05"]
+                    results: ["sunny", "14:05"],
+                    text: "",
+                    shape: withCalls
                 )
             )
 
@@ -382,6 +401,91 @@ import Testing
             )
             #expect(messages.last?["content"] as? String == "Sunny, and it is 14:05.")
             #expect(messages.last?["tool_calls"] == nil)
+        }
+
+        @Test func toolRoundLeavesTheTextOutWhereTheFlagIsFalse() {
+            let messages = raw(
+                makeMLXToolRoundMessages(
+                    calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
+                    results: ["sunny", "14:05"],
+                    text: "I will look that up.",
+                    shape: .withCalls(textWithFirstCall: false)
+                )
+            )
+
+            #expect(roles(messages) == ["assistant", "tool", "assistant", "tool"])
+            #expect(messages.allSatisfy { $0["content"] as? String != "I will look that up." })
+            #expect(messages[0]["content"] as? String == "")
+            #expect((messages[0]["tool_calls"] as? [[String: any Sendable]])?.count == 1)
+        }
+
+        @Test func toolRoundWithoutCallsPutsTheTextFirst() {
+            let messages = raw(
+                makeMLXToolRoundMessages(
+                    calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
+                    results: ["sunny", "14:05"],
+                    text: "I will look that up.",
+                    shape: .withoutCalls
+                )
+            )
+
+            #expect(roles(messages) == ["assistant", "tool", "tool"])
+            #expect(messages[0]["content"] as? String == "I will look that up.")
+            #expect(messages[0]["tool_calls"] == nil)
+            #expect(messages[1]["content"] as? String == "sunny")
+            #expect(messages[2]["content"] as? String == "14:05")
+            for tool in messages.dropFirst() {
+                #expect(tool["tool_call_id"] == nil)
+                #expect(tool["name"] == nil)
+            }
+        }
+
+        @Test func toolRoundWithoutCallsLeavesOutAnEmptyText() {
+            let messages = raw(
+                makeMLXToolRoundMessages(
+                    calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
+                    results: ["sunny", "14:05"],
+                    text: "",
+                    shape: .withoutCalls
+                )
+            )
+
+            #expect(roles(messages) == ["tool", "tool"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+        }
+
+        @Test func transcriptToolRoundWithoutCallsIsItsResultAlone() throws {
+            let messages = try converted(
+                [
+                    prompt("What is the weather in Paris?"),
+                    .toolCalls(Transcript.ToolCalls([transcriptCall("get_weather", id: "id-1")])),
+                    output("sunny", id: "id-1", toolName: "get_weather"),
+                    response("It is sunny."),
+                ],
+                shape: .withoutCalls
+            )
+
+            #expect(roles(messages) == ["user", "tool", "assistant"])
+            #expect(messages.allSatisfy { $0["tool_calls"] == nil })
+            #expect(messages[1]["content"] as? String == "sunny")
+            #expect(messages[1]["tool_call_id"] == nil)
+            #expect(messages[1]["name"] == nil)
+            #expect(messages[2]["content"] as? String == "It is sunny.")
+        }
+
+        @Test func transcriptToolOutputWithNoCallIsBareWithoutCalls() {
+            let messages = converted(
+                [
+                    prompt("What is the weather in Paris?"),
+                    output("sunny", id: "id-1", toolName: "get_weather"),
+                ],
+                shape: .withoutCalls
+            )
+
+            #expect(roles(messages) == ["user", "tool"])
+            #expect(messages.last?["content"] as? String == "sunny")
+            #expect(messages.last?["tool_call_id"] == nil)
+            #expect(messages.last?["name"] == nil)
         }
     }
 #endif  // MLX

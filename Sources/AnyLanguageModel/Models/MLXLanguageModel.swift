@@ -20,9 +20,11 @@ import Foundation
     import HuggingFace
     import Tokenizers
 
-    /// Keeps vocabulary-derived tokens alive with the loaded model and tokenizer.
+    /// Keeps vocabulary-derived tokens alive with the loaded model and tokenizer,
+    /// together with what the model's chat template does with a tool round.
     private struct LoadedModelContext {
         let context: ModelContext
+        let toolRoundTraits: MLXToolRoundTraits
         let tokenCache = StructuredGenerationTokenCache()
     }
 
@@ -74,7 +76,10 @@ import Foundation
 
             let task = Task {
                 let context = try await loader()
-                return CachedModelState(.loaded(LoadedModelContext(context: context)))
+                let toolRoundTraits = await mlxToolRoundTraits(of: context)
+                return CachedModelState(
+                    .loaded(LoadedModelContext(context: context, toolRoundTraits: toolRoundTraits))
+                )
             }
             setInFlight(task, for: key)
 
@@ -179,6 +184,26 @@ import Foundation
 
     /// Shared cache across MLXLanguageModel instances.
     private nonisolated(unsafe) let modelCache = ModelContextCache(countLimit: 3)
+
+    /// Reads what the model's chat template does with a tool round.
+    ///
+    /// The probe's conversations go through the model's own processor and chat template,
+    /// as a request would, and the prompt is decoded with its special tokens kept,
+    /// so a token that closes a turn stays visible in the text.
+    private func mlxToolRoundTraits(of context: ModelContext) async -> MLXToolRoundTraits {
+        await MLXToolRoundTraits.probe { chat in
+            let input = try await context.processor.prepare(
+                input: MLXLMCommon.UserInput(
+                    chat: chat,
+                    processing: .init(resize: nil),
+                    tools: nil,
+                    additionalContext: nil
+                )
+            )
+            let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
+            return context.tokenizer.decode(tokenIds: tokens)
+        }
+    }
 
     // MARK: - MLXLanguageModel
 
@@ -741,6 +766,11 @@ import Foundation
             GPUMemoryManager.shared.evictIfSafe()
         }
 
+        /// What the loaded model's chat template does with a tool round. Loads the model when it isn't loaded.
+        func toolRoundTraits() async throws -> MLXToolRoundTraits {
+            try await loadContext(modelId: modelId, hub: hub, directory: directory).toolRoundTraits
+        }
+
         /// Get or load model context with caching
         private func loadContext(modelId: String, hub: HubClient?, directory: URL?) async throws -> LoadedModelContext {
             let key = directory?.absoluteString ?? modelId
@@ -1108,6 +1138,7 @@ import Foundation
             let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
             defer { withExtendedLifetime(loaded) {} }
             let context = loaded.context
+            let toolRoundShape = MLXToolRoundShape(loaded.toolRoundTraits)
             let generationScope = beginGenerationScope()
             defer { endGenerationScope(generationScope) }
 
@@ -1120,7 +1151,8 @@ import Foundation
                     prompt: prompt,
                     schema: schema,
                     options: options,
-                    includeSchemaInPrompt: includeSchemaInPrompt
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    toolRoundShape: toolRoundShape
                 )
                 let generatedContent = try GeneratedContent(json: jsonString)
                 let content = try type.init(generatedContent)
@@ -1157,7 +1189,8 @@ import Foundation
                 let chat =
                     convertTranscriptToMLXChat(
                         requestContext: requestContext,
-                        fallbackPrompt: prompt.description
+                        fallbackPrompt: prompt.description,
+                        toolRoundShape: toolRoundShape
                     ) + pendingChat
                 // Build user input with current chat history and tools
                 let userInput = makeUserInput(
@@ -1257,12 +1290,13 @@ import Foundation
                                 allEntries.append(.toolOutput(invocation.output))
                             }
 
-                            // Feed the calls and their results back for the next step.
-                            // The text of this round is replayed with the first call.
+                            // Feed the calls and their results back for the next step,
+                            // in the shape that suits the model's chat template.
                             pendingChat += makeMLXToolRoundMessages(
                                 calls: collectedToolCalls,
                                 results: invocations.map { toolOutputToJSON($0.output) },
-                                text: assistantText
+                                text: assistantText,
+                                shape: toolRoundShape
                             )
 
                             // Continue loop to generate with tool results
@@ -1382,6 +1416,7 @@ import Foundation
                         let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
                         defer { withExtendedLifetime(loaded) {} }
                         let context = loaded.context
+                        let toolRoundShape = MLXToolRoundShape(loaded.toolRoundTraits)
 
                         // Build chat inside task to avoid Sendable issues
                         let generateParameters = toGenerateParameters(options)
@@ -1422,7 +1457,8 @@ import Foundation
                             let chat =
                                 convertTranscriptToMLXChat(
                                     requestContext: requestContext,
-                                    fallbackPrompt: prompt.description
+                                    fallbackPrompt: prompt.description,
+                                    toolRoundShape: toolRoundShape
                                 ) + pendingChat
                             let userInput = makeUserInput(
                                 chat: chat,
@@ -1516,12 +1552,13 @@ import Foundation
                                 for invocation in invocations {
                                     accumulatedEntries.append(.toolOutput(invocation.output))
                                 }
-                                // Feed the calls and their results back for the next step.
-                                // The text of this round is replayed with the first call.
+                                // Feed the calls and their results back for the next step,
+                                // in the shape that suits the model's chat template.
                                 pendingChat += makeMLXToolRoundMessages(
                                     calls: collectedToolCalls,
                                     results: invocations.map { toolOutputToJSON($0.output) },
-                                    text: roundText
+                                    text: roundText,
+                                    shape: toolRoundShape
                                 )
                                 yieldSnapshot()
                             }
@@ -1699,15 +1736,19 @@ import Foundation
 
     /// Converts a transcript into an MLX chat.
     ///
-    /// A tool output is replayed together with the call it answers,
+    /// With `.withCalls`, a tool output is replayed together with the call it answers,
     /// in the shape that `makeMLXToolRoundMessages` builds.
     /// A call that has no output is left out.
     /// An output that comes after a later prompt or response
     /// is not paired with a call from before it.
     /// An output that answers no call is replayed on its own, with its own id and tool name.
+    /// A transcript holds no text beside the calls of a round, so none is replayed with them.
+    ///
+    /// With `.withoutCalls`, calls are not replayed, and every tool output is a bare tool message.
     func convertTranscriptToMLXChat(
         requestContext: LanguageModelSession.RequestContext,
-        fallbackPrompt: String
+        fallbackPrompt: String,
+        toolRoundShape: MLXToolRoundShape
     ) -> [MLXLMCommon.Chat.Message] {
         var chat: [MLXLMCommon.Chat.Message] = []
 
@@ -1753,6 +1794,11 @@ import Foundation
 
             case .toolOutput(let toolOutput):
                 let content = toolOutput.segments.map { extractText(from: $0) }.joined(separator: "\n")
+                if toolRoundShape == .withoutCalls {
+                    // This shape doesn't replay calls: every output is a bare tool message.
+                    chat.append(.tool(content))
+                    continue
+                }
                 // An output answers the call that shares its id, or else the oldest unanswered call.
                 let index =
                     unansweredCalls.firstIndex(where: { $0.id == toolOutput.id })
@@ -1763,7 +1809,13 @@ import Foundation
                     continue
                 }
                 let call = unansweredCalls.remove(at: index)
-                chat += makeMLXToolRoundMessages(calls: [makeMLXToolCall(from: call)], results: [content])
+                chat += makeMLXToolRoundMessages(
+                    calls: [makeMLXToolCall(from: call)],
+                    results: [content],
+                    text: "",
+                    // A transcript holds no text beside the calls of a round, so the flag has nothing to keep.
+                    shape: .withCalls(textWithFirstCall: false)
+                )
             }
         }
 
@@ -2062,15 +2114,19 @@ import Foundation
 
     /// Builds the chat messages for one finished tool round.
     ///
-    /// Every call gets its own assistant message, directly followed by the tool message
+    /// `text` is what the model wrote beside the calls of this round.
+    ///
+    /// With `.withoutCalls`, the calls aren't replayed:
+    /// the round is the text as an assistant message, when there is any,
+    /// followed by each result as a tool message that carries no id and no tool name.
+    ///
+    /// With `.withCalls`, every call gets its own assistant message, directly followed by the tool message
     /// that answers it and carries the call's id and tool name.
     /// Chat templates differ in how they tie a result to its call,
     /// some accept only one call per assistant message,
     /// and some leave out or reject a result that doesn't follow a call.
-    ///
-    /// `text` is what the model wrote beside the calls of this round.
-    /// It is the content of the first call's assistant message,
-    /// the same message that holds the call.
+    /// The text is the content of the first call's assistant message, the same message that holds the call,
+    /// where `textWithFirstCall` holds, and is left out otherwise.
     /// The assistant messages of the other calls have no content.
     /// Where the text stands in the prompt is up to the chat template.
     ///
@@ -2081,8 +2137,13 @@ import Foundation
     func makeMLXToolRoundMessages(
         calls: [MLXLMCommon.ToolCall],
         results: [String],
-        text: String = ""
+        text: String,
+        shape: MLXToolRoundShape
     ) -> [MLXLMCommon.Chat.Message] {
+        guard case .withCalls(let textWithFirstCall) = shape else {
+            let assistantText: [MLXLMCommon.Chat.Message] = text.isEmpty ? [] : [.assistant(text)]
+            return assistantText + results.map { MLXLMCommon.Chat.Message.tool($0) }
+        }
         var messages: [MLXLMCommon.Chat.Message] = []
         messages.reserveCapacity(calls.count * 2)
         for (index, (call, result)) in zip(calls, results).enumerated() {
@@ -2093,7 +2154,7 @@ import Foundation
                 ),
                 id: call.id
             )
-            messages.append(.assistant(index == 0 ? text : "", toolCalls: [replayedCall]))
+            messages.append(.assistant(index == 0 && textWithFirstCall ? text : "", toolCalls: [replayedCall]))
             messages.append(.tool(result, id: call.id, name: call.function.name))
         }
         return messages
@@ -2173,14 +2234,16 @@ import Foundation
         prompt: Prompt,
         schema: GenerationSchema,
         options: GenerationOptions,
-        includeSchemaInPrompt: Bool
+        includeSchemaInPrompt: Bool,
+        toolRoundShape: MLXToolRoundShape
     ) async throws -> (String, LanguageModelSession.Usage) {
         let maxTokens = options.maximumResponseTokens ?? 512
         let generateParameters = toStructuredGenerateParameters(options)
 
         let baseChat = convertTranscriptToMLXChat(
             requestContext: requestContext,
-            fallbackPrompt: prompt.description
+            fallbackPrompt: prompt.description,
+            toolRoundShape: toolRoundShape
         )
         let schemaPrompt = includeSchemaInPrompt ? schemaPrompt(for: schema) : nil
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
