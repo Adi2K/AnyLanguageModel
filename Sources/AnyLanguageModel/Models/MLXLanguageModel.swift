@@ -1258,10 +1258,11 @@ import Foundation
                             }
 
                             // Feed the calls and their results back for the next step.
-                            // The text of this round stays in the response and isn't replayed.
+                            // The text of this round is replayed with the first call.
                             pendingChat += makeMLXToolRoundMessages(
                                 calls: collectedToolCalls,
-                                results: invocations.map { toolOutputToJSON($0.output) }
+                                results: invocations.map { toolOutputToJSON($0.output) },
+                                text: assistantText
                             )
 
                             // Continue loop to generate with tool results
@@ -1438,6 +1439,7 @@ import Foundation
                             )
                             let mlxStream = resolved.stream
 
+                            var roundText = ""
                             var collectedToolCalls: [MLXLMCommon.ToolCall] = []
                             var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
@@ -1447,6 +1449,7 @@ import Foundation
                                 switch item {
                                 case .chunk(let text):
                                     accumulatedText += text
+                                    roundText += text
                                     yieldSnapshot()
                                 case .toolCall(let call):
                                     collectedToolCalls.append(call)
@@ -1514,10 +1517,11 @@ import Foundation
                                     accumulatedEntries.append(.toolOutput(invocation.output))
                                 }
                                 // Feed the calls and their results back for the next step.
-                                // The text of this round stays in the response and isn't replayed.
+                                // The text of this round is replayed with the first call.
                                 pendingChat += makeMLXToolRoundMessages(
                                     calls: collectedToolCalls,
-                                    results: invocations.map { toolOutputToJSON($0.output) }
+                                    results: invocations.map { toolOutputToJSON($0.output) },
+                                    text: roundText
                                 )
                                 yieldSnapshot()
                             }
@@ -2064,17 +2068,24 @@ import Foundation
     /// some accept only one call per assistant message,
     /// and some leave out or reject a result that doesn't follow a call.
     ///
+    /// `text` is what the model wrote beside the calls of this round.
+    /// It is the content of the first call's assistant message,
+    /// the same message that holds the call.
+    /// The assistant messages of the other calls have no content.
+    /// Where the text stands in the prompt is up to the chat template.
+    ///
     /// A null argument, at any depth, is left out of the replayed call,
     /// because a null reaches the chat template engine as a value it rejects.
     ///
     /// `results[i]` must be the result of `calls[i]`.
     func makeMLXToolRoundMessages(
         calls: [MLXLMCommon.ToolCall],
-        results: [String]
+        results: [String],
+        text: String = ""
     ) -> [MLXLMCommon.Chat.Message] {
         var messages: [MLXLMCommon.Chat.Message] = []
         messages.reserveCapacity(calls.count * 2)
-        for (call, result) in zip(calls, results) {
+        for (index, (call, result)) in zip(calls, results).enumerated() {
             let replayedCall = MLXLMCommon.ToolCall(
                 function: .init(
                     name: call.function.name,
@@ -2082,7 +2093,7 @@ import Foundation
                 ),
                 id: call.id
             )
-            messages.append(.assistant("", toolCalls: [replayedCall]))
+            messages.append(.assistant(index == 0 ? text : "", toolCalls: [replayedCall]))
             messages.append(.tool(result, id: call.id, name: call.function.name))
         }
         return messages

@@ -116,6 +116,25 @@ import Testing
             try expectExchanges([Exchange(name: "get_weather", id: "call_1", result: "sunny")], in: messages)
         }
 
+        @Test func toolRoundKeepsTheTextBesideTheCallOnTheFirstCallsMessage() throws {
+            let messages = raw(
+                makeMLXToolRoundMessages(
+                    calls: [call("get_weather", id: "call_1"), call("get_time", id: "call_2")],
+                    results: ["sunny", "14:05"],
+                    text: "I will look that up."
+                )
+            )
+
+            #expect(roles(messages) == ["assistant", "tool", "assistant", "tool"])
+            // The text and the first call share one assistant message; the second call's message has no text.
+            #expect(messages[0]["content"] as? String == "I will look that up.")
+            #expect((messages[0]["tool_calls"] as? [[String: any Sendable]])?.count == 1)
+            #expect(messages[1]["content"] as? String == "sunny")
+            #expect(messages[2]["content"] as? String == "")
+            #expect((messages[2]["tool_calls"] as? [[String: any Sendable]])?.count == 1)
+            #expect(messages[3]["content"] as? String == "14:05")
+        }
+
         @Test func toolRoundLeavesANullArgumentOutOfTheReplayedCall() throws {
             let messages = raw(
                 makeMLXToolRoundMessages(
